@@ -54,6 +54,7 @@ class MetadataManager:
         self.h1 = None
         self.ignoredTerms = []
         self.ignoredVars = []
+        self.includeCanIUsePanels = False
         self.indent = 4
         self.inlineGithubIssues = False
         self.issueClass = "issue"
@@ -627,7 +628,7 @@ def parse(lines, doc):
     blockSize = 0
     md = MetadataManager(doc)
     for i,line in enumerate(lines):
-        if not inMetadata and re.match(r"<pre .*class=.*metadata.*>", line):
+        if not inMetadata and re.match(r"<pre [^>]*class=[^>]*metadata[^>]*>", line):
             blockSize = 1
             inMetadata = True
             md.hasMetadata = True
@@ -808,6 +809,7 @@ knownKeys = {
     "Ignored Terms": Metadata("Ignored Terms", "ignoredTerms", joinList, parseCommaSeparated),
     "Ignored Vars": Metadata("Ignored Vars", "ignoredVars", joinList, parseCommaSeparated),
     "Indent": Metadata("Indent", "indent", joinValue, parseInteger),
+    "Include Can I Use Panels": Metadata("Include Can I Use Panels", "includeCanIUsePanels", joinValue, parseBoolean),
     "Inline Github Issues": Metadata("Inline Github Issues", "inlineGithubIssues", joinValue, parseBoolean),
     "Issue Class": Metadata("Issue Class", "issueClass", joinValue, parseLiteral),
     "Issue Tracker Template": Metadata("Issue Tracker Template", "issueTrackerTemplate", joinValue, parseLiteral),

@@ -346,6 +346,35 @@ def childNodes(parentEl, clear=False, skipOddNodes=True):
     return ret
 
 
+def nodeIter(el, clear=False, skipOddNodes=True):
+    # Iterates thru an element and all its descendants,
+    # yielding up each child node it sees in depth-first order.
+    # (In other words, same as el.iter(),
+    #  but returning nodes+strings rather than the stupid LXML model.)
+    # Takes the same kwargs as childNodes
+    if isinstance(el, basestring):
+        yield el
+        return
+    if isinstance(el, etree._ElementTree):
+        el = el.getroot()
+    text = el.text
+    tail = el.tail
+    if clear:
+        el.text = None
+        el.tail = None
+    yield el
+    if text is not None:
+        yield text
+    for c in childElements(el, tag=None):
+        if skipOddNodes and isOddNode(c):
+            continue
+        # yield from nodeIter(c, clear=clear, skipOddNodes=skipOddNodes)
+        for grandChild in nodeIter(c, clear=clear, skipOddNodes=skipOddNodes):
+            yield grandChild
+    if tail is not None:
+        yield tail
+
+
 def treeAttr(el, attrName):
     # Find the nearest instance of the given attr in the tree
     # Useful for when you can put an attr on an ancestor and apply it to all contents.
@@ -369,12 +398,28 @@ def closestAttr(el, *attrs):
     return None, None
 
 
+def closestAncestor(el, pred):
+    # Finds the nearest ancestor matching a predicate
+    for target in el.iterancestors():
+        if pred(target):
+            return target
+
+
+def filterAncestors(el, pred):
+    # Returns all ancestors that match the predicate
+    for target in el.iterancestors():
+        if pred(target):
+            yield target
+
+
+def hasAncestor(el, pred):
+    return closestAncestor(el, pred) is not None
+
+
 def removeAttr(el, attrName):
     # Remove an attribute, silently ignoring if attr doesn't exist.
-    try:
+    if el.get(attrName) is not None:
         del el.attrib[attrName]
-    except:
-        pass
     return el
 
 
@@ -447,6 +492,24 @@ def hasChildElements(el):
         return True
     except StopIteration:
         return False
+
+
+# If the element has one child element, returns it.
+# Otherwise, returns None
+def hasOnlyChild(el):
+    children = childElements(el)
+    try:
+        single = children.next()
+    except StopIteration:
+        # No children
+        return None
+    try:
+        children.next()
+        # At least two children
+        return None
+    except StopIteration:
+        # Exactly one child
+        return single
 
 
 def fixTypography(text):

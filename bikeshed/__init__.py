@@ -2,7 +2,7 @@
 
 from __future__ import division, unicode_literals
 import re
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 import io
 import os
 import sys
@@ -96,6 +96,7 @@ def main():
     updateParser = subparsers.add_parser('update', help="Update supporting files (those in /spec-data).", epilog="If no options are specified, everything is downloaded.")
     updateParser.add_argument("--anchors", action="store_true", help="Download crossref anchor data.")
     updateParser.add_argument("--biblio", action="store_true", help="Download biblio data.")
+    updateParser.add_argument("--caniuse", action="store_true", help="Download Can I Use... data.")
     updateParser.add_argument("--link-defaults", dest="linkDefaults", action="store_true", help="Download link default data.")
     updateParser.add_argument("--test-suites", dest="testSuites", action="store_true", help="Download test suite data.")
 
@@ -150,11 +151,14 @@ def main():
 
     testParser = subparsers.add_parser('test', help="Tools for running Bikeshed's testsuite.")
     testParser.add_argument("--rebase",
-                            dest="rebaseFiles",
-                            default=None,
+                            default=False,
+                            action="store_true",
+                            help="Rebase the specified files.")
+    testParser.add_argument('testFiles',
+                            default=[],
                             metavar="FILE",
                             nargs="*",
-                            help="Rebase the specified files. If called with no args, rebases everything.")
+                            help="Run these tests. If called with no args, tests everything.")
 
     profileParser = subparsers.add_parser('profile', help="Profiling Bikeshed. Needs graphviz, gprof2dot, and xdot installed.")
     profileParser.add_argument("--root",
@@ -182,7 +186,7 @@ def main():
 
     update.fixupDataFiles()
     if options.subparserName == "update":
-        update.update(anchors=options.anchors, biblio=options.biblio, linkDefaults=options.linkDefaults, testSuites=options.testSuites)
+        update.update(anchors=options.anchors, biblio=options.biblio, caniuse=options.caniuse, linkDefaults=options.linkDefaults, testSuites=options.testSuites)
     elif options.subparserName == "spec":
         doc = Spec(inputFilename=options.infile, debug=options.debug, token=options.ghToken, lineNumbers=options.lineNumbers)
         doc.md = metadata.fromCommandLine(extras, doc)
@@ -258,12 +262,12 @@ def main():
             font = fonts.Font()
             fonts.replaceComments(font=font, inputFilename=options.infile, outputFilename=options.outfile)
     elif options.subparserName == "test":
-        if options.rebaseFiles is not None:
-            test.rebase(options.rebaseFiles)
+        if options.rebase:
+            test.rebase(options.testFiles)
         else:
             config.force = True
             config.quiet = 2
-            result = test.runAllTests(constructor=Spec)
+            result = test.runAllTests(Spec, options.testFiles)
             sys.exit(0 if result else 1)
     elif options.subparserName == "profile":
         root = "--root=\"{0}\"".format(options.root) if options.root else ""
@@ -324,7 +328,9 @@ class Spec(object):
         self.externalRefsUsed = defaultdict(dict)
         self.md = metadata.MetadataManager(doc=self)
         self.biblios = {}
+        self.typeExpansions = {}
         self.macros = defaultdict(lambda x: "???")
+        self.canIUse = json.loads(config.retrieveDataFile("caniuse.json", quiet=True, str=True), object_pairs_hook=OrderedDict)
         self.widl = parser.Parser(ui=IDLSilent())
         self.testSuites = json.loads(config.retrieveDataFile("test-suites.json", quiet=True, str=True))
         self.languages = json.loads(config.retrieveDataFile("languages.json", quiet=True, str=True))
@@ -524,11 +530,14 @@ class Spec(object):
 
         # Build the document
         self.document = parseDocument(self.html)
+        self.head = find("head", self)
+        self.body = find("body", self)
         correctH1(self)
         processInclusions(self)
         metadata.parseDoc(self)
 
         # Fill in and clean up a bunch of data
+        self.fillContainers = locateFillContainers(self)
         lint.lintExampleIDs(self)
         boilerplate.addBikeshedVersion(self)
         boilerplate.addStatusSection(self)
@@ -561,6 +570,7 @@ class Spec(object):
         formatArgumentdefTables(self)
         formatElementdefTables(self)
         processAutolinks(self)
+        addCanIUsePanels(self)
         boilerplate.addIndexSection(self)
         boilerplate.addExplicitIndexes(self)
         boilerplate.addStyles(self)
@@ -857,7 +867,9 @@ def canonicalizeShortcuts(doc):
                 del el.attrib[linkType]
                 el.set("data-link-type", linkType)
                 break
-    for el in findAll(",".join("{0}[for]".format(x) for x in config.dfnElements.union(["a"])), doc):
+    for el in findAll(config.dfnElementsSelector + ", a", doc):
+        if el.get("for") is None:
+            continue
         if el.tag == "a":
             el.set("data-link-for", el.get('for'))
         else:
@@ -1036,9 +1048,9 @@ def fillAttributeInfoSpans(doc):
                 continue
             if "/" in referencedAttribute:
                 interface, referencedAttribute = referencedAttribute.split("/")
-                target = findAll('[data-link-type={2}][data-lt="{0}"][data-link-for="{1}"]'.format(referencedAttribute, interface, refType), doc)
+                target = findAll('a[data-link-type={2}][data-lt="{0}"][data-link-for="{1}"]'.format(referencedAttribute, interface, refType), doc)
             else:
-                target = findAll('[data-link-type={1}][data-lt="{0}"]'.format(referencedAttribute, refType), doc)
+                target = findAll('a[data-link-type={1}][data-lt="{0}"]'.format(referencedAttribute, refType), doc)
             if len(target) == 0:
                 die("Couldn't find target {1} '{0}':\n{2}", referencedAttribute, refType, outerHTML(el), el=el)
                 continue
@@ -1390,17 +1402,16 @@ def decorateAutolink(doc, el, linkType, linkText):
     # Add additional effects to some autolinks.
     if linkType == "type":
         # Get all the values that the type expands to, add it as a title.
-        if linkText in decorateAutolink.cache:
-            titleText = decorateAutolink.cache[linkText]
+        if linkText in doc.typeExpansions:
+            titleText = doc.typeExpansions[linkText]
             error = False
         else:
             refs, error = doc.refs.queryRefs(linkFor=linkText)
             if not error:
                 titleText = "Expands to: " + ' | '.join(ref.text for ref in refs)
-                decorateAutolink.cache[linkText] = titleText
+                doc.typeExpansions[linkText] = titleText
         if not error:
             el.set('title', titleText)
-decorateAutolink.cache = {}
 
 
 def processIssuesAndExamples(doc):
@@ -1612,6 +1623,188 @@ def addDfnPanels(doc, dfns):
 
         .dfn-paneled { cursor: pointer; }
         '''
+
+def addCanIUsePanels(doc):
+    # Constructs "Can I Use panels" which show a compatibility data summary
+    # for a term's feature.
+    if not doc.md.includeCanIUsePanels:
+        return
+
+    features = doc.canIUse["data"]
+    lastUpdated = datetime.utcfromtimestamp(doc.canIUse["updated"]).date().isoformat()
+
+    # e.g. 'ios_saf' -> 'iOS Safari'
+    codeNameToFullName = OrderedDict( # sorted by full name
+        sorted(
+            [
+                (agentCodeName, agent["browser"])
+                for agentCodeName, agent
+                in doc.canIUse["agents"].iteritems()
+            ],
+            key=lambda p: p[1]
+        )
+    )
+    atLeastOnePanel = False
+    caniuseDfnElementsSelector = ",".join(
+        selector + "[caniuse]"
+        for selector in config.dfnElementsSelector.split(",")
+    )
+    for dfn in findAll(caniuseDfnElementsSelector, doc):
+        featId = dfn.get("caniuse")
+        if not featId:
+            continue
+        del dfn.attrib["caniuse"]
+
+        featId = featId.lower()
+        if featId not in features:
+            die("Unrecognized Can I Use feature ID: {0}", featId)
+        feature = features[featId]
+
+        addClass(dfn, "caniuse-paneled")
+        panel = canIUsePanelFor(codeNameToFullName, featId, feature['stats'], lastUpdated)
+        panel.set("dfn-id", dfn.get("id"))
+        appendChild(doc.body, panel)
+        atLeastOnePanel = True
+
+    if atLeastOnePanel:
+        doc.extraScripts['script-caniuse-panel'] = '''
+            window.addEventListener("load", function(){
+                var panels = [].slice.call(document.querySelectorAll(".caniuse-status"));
+                for(var i = 0; i < panels.length; i++) {
+                    var panel = panels[i];
+                    var dfn = document.querySelector("#" + panel.getAttribute("dfn-id"));
+                    var rect = dfn.getBoundingClientRect();
+                    panel.style.top = (window.scrollY + rect.top) + "px";
+                }
+            });
+            document.body.addEventListener("click", function(e) {
+                if(e.target.classList.contains("caniuse-panel-btn")) {
+                    e.target.parentNode.classList.toggle("wrapped");
+                }
+            });'''
+        doc.extraStyles['style-caniuse-panel'] = '''
+            .caniuse-status { font: 1em sans-serif; width: 9em; padding: 0.3em; position: absolute; z-index: 8; top: auto; right: 0.3em; background: #EEE; color: black; box-shadow: 0 0 3px #999; overflow: hidden; border-collapse: initial; border-spacing: initial; }
+            .caniuse-status.wrapped { width: 1em; height: 1em; }
+            .caniuse-status.wrapped > :not(input) { display: none; }
+            .caniuse-status > input { position: absolute; right: 0; top: 0; width: 1em; height: 1em; border: none; background: transparent; padding: 0; margin: 0; }
+            .caniuse-status > p { font-size: 0.6em; margin: 0; padding: 0; }
+            .caniuse-status > p + p { padding-top: 0.5em; }
+            .caniuse-status > .support { display: block; }
+            .caniuse-status > .support > span { padding: 0.2em 0; display: block; display: table; }
+            .caniuse-status > .support > span.partial { color: #666666; filter: grayscale(50%); }
+            .caniuse-status > .support > span.no { color: #CCCCCC; filter: grayscale(100%); }
+            .caniuse-status > .support > span:first-of-type { padding-top: 0.5em; }
+            .caniuse-status > .support > span > span { padding: 0 0.5em; display: table-cell; vertical-align: top; }
+            .caniuse-status > .support > span > span:first-child { width: 100%; }
+            .caniuse-status > .support > span > span:last-child { width: 100%; white-space: pre; padding: 0; }
+            .caniuse-status > .support > span::before { content: ' '; display: table-cell; min-width: 1.5em; height: 1.5em; background: no-repeat center center; background-size: contain; text-align: right; font-size: 0.75em; font-weight: bold; }
+            .caniuse-status > .support > .and_chr::before { background-image: url(https://resources.whatwg.org/browser-logos/chrome.svg); }
+            .caniuse-status > .support > .and_ff::before { background-image: url(https://resources.whatwg.org/browser-logos/firefox.png); }
+            .caniuse-status > .support > .and_uc::before { background-image: url(https://resources.whatwg.org/browser-logos/uc.png); } /* UC Browser for Android */
+            .caniuse-status > .support > .android::before { background-image: url(https://resources.whatwg.org/browser-logos/android.svg); }
+            .caniuse-status > .support > .bb::before { background-image: url(https://resources.whatwg.org/browser-logos/bb.jpg); } /* Blackberry Browser */
+            .caniuse-status > .support > .chrome::before { background-image: url(https://resources.whatwg.org/browser-logos/chrome.svg); }
+            .caniuse-status > .support > .edge::before { background-image: url(https://resources.whatwg.org/browser-logos/edge.svg); }
+            .caniuse-status > .support > .firefox::before { background-image: url(https://resources.whatwg.org/browser-logos/firefox.png); }
+            .caniuse-status > .support > .ie::before { background-image: url(https://resources.whatwg.org/browser-logos/ie.png); }
+            .caniuse-status > .support > .ie_mob::before { background-image: url(https://resources.whatwg.org/browser-logos/ie-mobile.svg); }
+            .caniuse-status > .support > .ios_saf::before { background-image: url(https://resources.whatwg.org/browser-logos/safari-ios.svg); }
+            .caniuse-status > .support > .op_mini::before { background-image: url(https://resources.whatwg.org/browser-logos/opera-mini.png); }
+            .caniuse-status > .support > .op_mob::before { background-image: url(https://resources.whatwg.org/browser-logos/opera.png); }
+            .caniuse-status > .support > .opera::before { background-image: url(https://resources.whatwg.org/browser-logos/opera.png); }
+            .caniuse-status > .support > .safari::before { background-image: url(https://resources.whatwg.org/browser-logos/safari.png); }
+            .caniuse-status > .caniuse { text-align: right; font-style: italic; }
+            @media (max-width: 767px) {
+                .caniuse-status.wrapped { width: 9em; height: auto; }
+                .caniuse-status:not(.wrapped) { width: 1em; height: 1em; }
+                .caniuse-status.wrapped > :not(input) { display: block; }
+                .caniuse-status:not(.wrapped) > :not(input) { display: none; }
+            }'''
+
+
+def canIUsePanelFor(codeNameToFullName, featId, featStats, lastUpdated):
+    panel = E.aside({"class": "caniuse-status", "data-deco": ""},
+        E.input({"value": u"\u22F0", "type": "button", "class":"caniuse-panel-btn"}))
+    mainPara = E.p({"class": "support"}, E.b({}, "Support:"))
+    appendChild(panel, mainPara)
+    for browserCodeName, browserFullName in codeNameToFullName.iteritems():
+        statusCode, minVersion = compatSummaryFor(featStats[browserCodeName])
+        if statusCode == "u":
+            continue
+        appendChild(mainPara,
+            browserCompatSpan(browserCodeName, browserFullName, statusCode, minVersion))
+    appendChild(panel,
+        E.p({"class": "caniuse"},
+            "Source: ",
+            E.a({"href": "http://caniuse.com/#feat=" + featId}, "caniuse.com"),
+            " as of " + lastUpdated))
+    return panel
+
+
+def compatSummaryFor(versionToStatus):
+    bestStatusYet = "u"
+    lowestGoodVersion = None
+    versionsDescending = versionToStatus.keys()
+    versionsDescending.reverse()  # In the original JSON, they're in ascending order.
+    for version in versionsDescending:
+        status = versionToStatus[version]
+        if "u" in status:
+            continue
+        # Simplify vendor-prefi(x)ed/(d)isabled-by-default/(p)olyfilled to u(n)supported
+        # And remove notes etc. by canonicalizing to single char.
+        if "x" in status or "d" in status or "n" in status or "p" in status:
+            status = "n"
+        elif "a" in status:
+            status = "a"
+        elif "y" in status:
+            status = "y"
+        # assert status in "nay"
+
+        if bestStatusYet == "u":
+            # 1st datapoint
+            bestStatusYet = status
+            lowestGoodVersion = version
+            continue
+
+        if "n" in status:  # It Got Worse (or is still unsupported)
+            break
+
+        if status == bestStatusYet:
+            # New winner
+            lowestGoodVersion = version
+        else:
+            # Either: Old version was buggy, new version is fixed.
+            # Or: New version introduced bug(s); you can be no better than your last release.
+            break
+
+    return bestStatusYet, lowestGoodVersion
+
+
+def browserCompatSpan(browserCodeName, browserFullName, statusCode, minVersion=None):
+    if statusCode == "n" or minVersion is None:
+        minVersion = "None"
+    elif minVersion == "all":
+        minVersion = "All"
+    else:
+        # If the version is a range (e.g. "9.0-9.2"), just use the lower bound (e.g. "9.0").
+        minVersion = minVersion.partition('-')[0] + "+"
+    # browserCodeName: e.g. and_chr, ios_saf, ie, etc...
+    # browserFullName: e.g. "Chrome for Android"
+    statusClass = {"y": "yes", "n": "no", "a": "partial"}[statusCode]
+    outer = E.span({"class": browserCodeName + " " + statusClass})
+    if statusCode == "a":
+        appendChild(outer,
+            E.span({},
+                E.span({},
+                    browserFullName,
+                    " (limited)")))
+    else:
+        appendChild(outer,
+            E.span({}, browserFullName))
+    appendChild(outer,
+        E.span({},
+            minVersion))
+    return outer
 
 
 class DebugMarker(object):
@@ -2179,137 +2372,147 @@ def parsePygments(text):
 def cleanupHTML(doc):
     # Cleanup done immediately before serialization.
 
-    # Move any stray <link>, <meta>, or <style> into the <head>.
-    head = find("head", doc)
-    for el in findAll("body link, body meta, body style", doc):
-        head.append(el)
+    head = None
+    inBody = False
+    strayHeadEls = []
+    styleScoped = []
+    nestedLists = []
+    for el in doc.document.iter():
+        if head is None and el.tag == "head":
+            head = el
+            continue
+        if el.tag == "body":
+            inBody = True
 
-    for el in findAll("style[scoped]", doc):
-        die("<style scoped> is no longer part of HTML. Ensure your styles can apply document-globally and remove the scoped attribute.", el=el)
+        # Move any stray <link>, <meta>, or <style> into the <head>.
+        if inBody and el.tag in ["link", "meta", "style"]:
+            strayHeadEls.append(el)
 
-    # Move any <style scoped> to be the first child of their parent.
-    for el in findAll("style[scoped]", doc):
-        parent = parentElement(el)
-        prependChild(parent, el)
+        if el.tag == "style" and el.get("scoped") is not None:
+            die("<style scoped> is no longer part of HTML. Ensure your styles can apply document-globally and remove the scoped attribute.", el=el)
+            styleScoped.append(el)
 
-    # Convert the technically-invalid <nobr> element to an appropriate <span>
-    for el in findAll("nobr", doc):
-        el.tag = "span"
-        el.set("style", el.get('style', '') + ";white-space:nowrap")
+        # Convert the technically-invalid <nobr> element to an appropriate <span>
+        if el.tag == "nobr":
+            el.tag == "span"
+            el.set("style", el.get('style', '') + ";white-space:nowrap")
 
-    # And convert <xmp> to <pre>
-    for el in findAll("xmp", doc):
-        el.tag = "pre"
+        # And convert <xmp> to <pre>
+        if el.tag == "xmp":
+            el.tag = "pre"
 
-    # Some of the datablocks still put a line-number on their generated content.
-    for el in findAll("[line-number]", doc):
-        del el.attrib["line-number"]
+        # If we accidentally recognized an autolink shortcut in SVG, kill it.
+        if el.tag == "{http://www.w3.org/2000/svg}a" and el.get("data-link-type") is not None:
+            removeAttr(el, "data-link-type")
+            el.tag = "{http://www.w3.org/2000/svg}tspan"
 
-    # If we accidentally recognized an autolink shortcut in SVG, kill it.
-    for el in findAll("svg|a[data-link-type]", doc):
-        del el.attrib["data-link-type"]
-        el.tag = "{http://www.w3.org/2000/svg}tspan"
+        # Add .algorithm to [algorithm] elements, for styling
+        if el.get("data-algorithm") is not None and not hasClass(el, "algorithm"):
+            addClass(el, "algorithm")
 
-    # Add .algorithm to [algorithm] elements, for styling
-    for el in findAll("[data-algorithm]:not(.algorithm)", doc):
-        addClass(el, "algorithm")
+        # Allow MD-generated lists to be surrounded by HTML list containers,
+        # so you can add classes/etc without an extraneous wrapper.
+        if el.tag in ["ol", "ul", "dl"]:
+            onlyChild = hasOnlyChild(el)
+            if onlyChild is not None and el.tag == onlyChild.tag and el.get("data-md") is None and onlyChild.get("data-md") is not None:
+                # The md-generated list container is featureless,
+                # so we can just throw it away and move its children into its parent.
+                nestedLists.append(onlyChild)
+            else:
+                # Remove any lingering data-md attributes on lists that weren't using this container replacement thing.
+                removeAttr(el, "data-md")
 
-    # Allow MD-generated lists to be surrounded by HTML list containers,
-    # so you can add classes/etc without an extraneous wrapper.
-    for el in findAll("ol > ol[data-md]:only-child, ul > ul[data-md]:only-child, dl > dl[data-md]:only-child", doc):
-        # The md-generated list container is featureless,
-        # so we can just throw it away and move its children into its parent.
-        children = childNodes(el, clear=True)
-        parent = parentElement(el)
-        clearContents(parent)
-        appendChild(parent, *children)
+        # Mark pre.idl blocks as .def, for styling
+        if el.tag == "pre" and hasClass(el, "idl") and not hasClass(el, "def"):
+            addClass(el, "def")
 
-    # Remove any lingering data-md attributes on lists that weren't using this container replacement thing.
-    for el in findAll("ol[data-md], ul[data-md], dl[data-md]", doc):
-        removeAttr(el, "data-md")
+        # Tag classes on wide types of dfns/links
+        if el.tag in config.dfnElements:
+            if el.get("data-dfn-type") in config.idlTypes:
+                addClass(el, "idl-code")
+            if el.get("data-dfn-type") in config.maybeTypes.union(config.linkTypeToDfnType['propdesc']):
+                if not hasAncestor(el, lambda x:x.tag=="pre"):
+                    addClass(el, "css")
+        if el.tag == "a":
+            if el.get("data-link-type") in config.idlTypes:
+                addClass(el, "idl-code")
+            if el.get("data-link-type") in config.maybeTypes.union(config.linkTypeToDfnType['propdesc']):
+                if not hasAncestor(el, lambda x:x.tag=="pre"):
+                    addClass(el, "css")
 
-    # Mark pre.idl blocks as .def, for styling
-    for el in findAll("pre.idl:not(.def)", doc):
-        addClass(el, "def")
+        # Remove duplicate linking texts.
+        if el.tag in config.anchorishElements and el.get("data-lt") is not None and el.get("data-lt") == textContent(el, exact=True):
+            removeAttr(el, "data-lt")
 
-    # Tag classes on wide types of dfns/links
-    def selectorForTypes(types):
-        return (",".join("{0}[data-dfn-type={1}]".format(elName,type) for elName in config.dfnElements for type in types) +
-                "," + ",".join("a[data-link-type={0}]".format(type) for type in types))
-    for el in findAll(selectorForTypes(config.idlTypes), doc):
-        addClass(el, 'idl-code')
-    for el in findAll(selectorForTypes(config.maybeTypes.union(config.linkTypeToDfnType['propdesc'])), doc):
-        addClass(el, 'css')
-    # Correct over-application of the .css class
-    for el in findAll("pre .css", doc):
-        removeClass(el, 'css')
+        # Transform the <css> fake tag into markup.
+        # (Used when the ''foo'' shorthand doesn't work.)
+        if el.tag == "css":
+            el.tag = "span"
+            addClass(el, "css")
 
-    # Remove duplicate linking texts.
-    for el in findAll(",".join(x + "[data-lt]" for x in config.anchorishElements), doc):
-        if el.get('data-lt') == textContent(el, exact=True):
-            del el.attrib['data-lt']
+        # Transform the <assert> fake tag into a span with a unique ID based on its contents.
+        # This is just used to tag arbitrary sections with an ID so you can point tests at it.
+        # (And the ID will be guaranteed stable across publications, but guaranteed to change when the text changes.)
+        if el.tag == "assert":
+            el.tag = "span"
+            el.set("id", "assert-" + hashContents(el))
 
-    # Transform the <css> fake tag into markup.
-    # (Used when the ''foo'' shorthand doesn't work.)
-    for el in findAll("css", doc):
-        el.tag = "span"
-        addClass(el, "css")
+        # Add ARIA role of "note" to class="note" elements
+        if el.tag in ["div", "p"] and hasClass(el, doc.md.noteClass):
+            el.set("role", "note")
 
-    # Transform the <assert> fake tag into a span with a unique ID based on its contents.
-    # This is just used to tag arbitrary sections with an ID so you can point tests at it.
-    # (And the ID will be guaranteed stable across publications, but guaranteed to change when the text changes.)
-    for el in findAll("assert", doc):
-        el.tag = "span"
-        el.set("id", "assert-" + hashContents(el))
+        # Look for nested <a> elements, and warn about them.
+        if el.tag == "a" and hasAncestor(el, lambda x:x.tag=="a"):
+            warn("The following (probably auto-generated) link is illegally nested in another link:\n{0}", outerHTML(el), el=el)
 
-    # Add ARIA role of "note" to class="note" elements
-    for el in findAll("." + doc.md.noteClass, doc):
-        el.set("role", "note")
+        # If the <h1> contains only capital letters, add a class=allcaps for styling hook
+        if el.tag == "h1":
+            for letter in textContent(el):
+                if letter.isalpha() and letter.islower():
+                    break
+            else:
+                addClass(el, "allcaps")
 
-    # Look for nested <a> elements, and warn about them.
-    for el in findAll("a a", doc):
-        warn("The following (probably auto-generated) link is illegally nested in another link:\n{0}", outerHTML(el), el=el)
-
-    # If the <h1> contains only capital letters, add a class=allcaps for styling hook
-    h1 = find("h1", doc)
-    if h1 is not None:
-        for letter in textContent(h1):
-            if letter.isalpha() and letter.islower():
-                break
-        else:
-            addClass(h1, "allcaps")
-
-    # Remove a bunch of attributes
-    for el in findAll("[data-attribute-info], [data-dict-member-info]", doc):
-        removeAttr(el, 'data-attribute-info')
-        removeAttr(el, 'data-dict-member-info')
-        removeAttr(el, 'for')
-    for el in findAll("a, span", doc):
-        removeAttr(el, 'data-link-for')
-        removeAttr(el, 'data-link-for-hint')
-        removeAttr(el, 'data-link-status')
-        removeAttr(el, 'data-link-spec')
-        removeAttr(el, 'data-section')
-        removeAttr(el, 'data-biblio-type')
-        removeAttr(el, 'data-biblio-status')
-        removeAttr(el, 'data-okay-to-fail')
-        removeAttr(el, 'data-lt')
-    for el in findAll("[data-link-for]:not(a), [data-link-type]:not(a)", doc):
-        removeAttr(el, 'data-link-for')
-        removeAttr(el, 'data-link-type')
-    for el in findAll("[data-dfn-for]{0}, [data-dfn-type]{0}".format("".join(":not({0})".format(x) for x in config.dfnElements)), doc):
-        removeAttr(el, 'data-dfn-for')
-        removeAttr(el, 'data-dfn-type')
-    for el in findAll("[data-export]{0}, [data-noexport]{0}".format("".join(":not({0})".format(x) for x in config.dfnElements)), doc):
-        removeAttr(el, 'data-export')
-        removeAttr(el, 'data-noexport')
-    for el in findAll("[oldids], [data-alternate-id], [highlight], [nohighlight], [data-opaque], [data-no-self-link]", doc):
+        # Remove a bunch of attributes
+        if el.get("data-attribute-info") is not None or el.get("data-dict-member-info") is not None:
+            removeAttr(el, 'data-attribute-info')
+            removeAttr(el, 'data-dict-member-info')
+            removeAttr(el, 'for')
+        if el.tag in ["a", "span"]:
+            removeAttr(el, 'data-link-for')
+            removeAttr(el, 'data-link-for-hint')
+            removeAttr(el, 'data-link-status')
+            removeAttr(el, 'data-link-spec')
+            removeAttr(el, 'data-section')
+            removeAttr(el, 'data-biblio-type')
+            removeAttr(el, 'data-biblio-status')
+            removeAttr(el, 'data-okay-to-fail')
+            removeAttr(el, 'data-lt')
+        if el.tag != "a":
+            removeAttr(el, 'data-link-for')
+            removeAttr(el, 'data-link-type')
+        if el.tag not in config.dfnElements:
+            removeAttr(el, 'data-dfn-for')
+            removeAttr(el, 'data-dfn-type')
+            removeAttr(el, 'data-export')
+            removeAttr(el, 'data-noexport')
         removeAttr(el, 'oldids')
         removeAttr(el, 'data-alternate-id')
         removeAttr(el, 'highlight')
         removeAttr(el, 'nohighlight')
         removeAttr(el, 'data-opaque')
         removeAttr(el, 'data-no-self-link')
+        removeAttr(el, "line-number")
+    for el in strayHeadEls:
+        head.append(el)
+    for el in styleScoped:
+        parent = parentElement(el)
+        prependChild(parent, el)
+    for el in nestedLists:
+        children = childNodes(el, clear=True)
+        parent = parentElement(el)
+        clearContents(parent)
+        appendChild(parent, *children)
 
 
 def finalHackyCleanup(text):
@@ -2533,3 +2736,10 @@ def addNoteHeaders(doc):
         prependChild(el,
                      E.div({"class":"marker"}, preText, *parseHTML(el.get('heading'))))
         removeAttr(el, "heading")
+
+
+def locateFillContainers(doc):
+    fillContainers = defaultdict(list)
+    for el in findAll("[data-fill-with]", doc):
+        fillContainers[el.get("data-fill-with")].append(el)
+    return fillContainers

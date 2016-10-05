@@ -25,7 +25,7 @@ def addHeaderFooter(doc):
 
 
 def fillWith(tag, newElements, doc):
-    for el in findAll("[data-fill-with='{0}']".format(tag), doc):
+    for el in doc.fillContainers[tag]:
         replaceContents(el, newElements)
 
 
@@ -46,15 +46,15 @@ def getFillContainer(tag, doc, default=False):
         return None
 
     # If a fill-with is found, fill that
-    if find("[data-fill-with='{0}']".format(tag), doc) is not None:
-        return find("[data-fill-with='{0}']".format(tag), doc)
+    if doc.fillContainers[tag]:
+        return doc.fillContainers[tag][0]
 
     # Otherwise, append to the end of the document,
     # unless you're in the byos group
     if doc.md.group == "byos":
         return None
     if default:
-        return find("body", doc)
+        return doc.body
 
 
 def addLogo(doc):
@@ -106,18 +106,17 @@ def addStyles(doc):
 
 def addCustomBoilerplate(doc):
     for el in findAll('[boilerplate]', doc):
-        bType = el.get('boilerplate')
-        target = find('[data-fill-with="{0}"]'.format(bType), doc)
-        if target is not None:
-            replaceContents(target, el)
+        tag = el.get('boilerplate')
+        if doc.fillContainers[tag]:
+            replaceContents(doc.fillContainers[tag][0], el)
             removeNode(el)
 
 
 def removeUnwantedBoilerplate(doc):
-    for el in findAll('[data-fill-with]', doc):
-        tag = el.get('data-fill-with')
+    for tag,els in doc.fillContainers.items():
         if tag not in doc.md.boilerplate:
-            removeNode(el)
+            for el in els:
+                removeNode(el)
 
 
 def addAnnotations(doc):
@@ -169,7 +168,9 @@ def addIndexOfLocallyDefinedTerms(doc, container):
                 E.h3({"class":"no-num no-ref", "id":"index-defined-here"}, "Terms defined by this specification"))
 
     indexEntries = defaultdict(list)
-    for el in findAll(",".join(x + "[id]" for x in config.dfnElements), doc):
+    for el in findAll(config.dfnElementsSelector, doc):
+        if el.get('id') is None or el.get('data-dfn-type') is None:
+            continue
         linkTexts = config.linkTextsFromElement(el)
         headingLevel = headingLevelOfElement(el) or "Unnumbered section"
         type = el.get('data-dfn-type')
