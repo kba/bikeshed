@@ -1,14 +1,14 @@
-FROM python:2.7-wheezy
-
-RUN apt-get install libxslt1-dev libxml2-dev && \
-    pip install pygments && \
-    pip install lxml --upgrade
-
-WORKDIR /data
+FROM alpine:3.4
+ENV PYTHONIOENCODING utf8
 
 COPY . /usr/bikeshed
 
-RUN pip install --editable /usr/bikeshed && bikeshed update
+RUN apk add --no-cache python python-dev libxslt-dev libxml2 libxml2-dev py-pygments py-pip g++ ca-certificates &&\
+    pip install --editable /usr/bikeshed && \
+    apk del g++ python-dev py-pip && \
+    rm -rf /root/.cache && \
+    bikeshed update
 
 VOLUME /data
-ENTRYPOINT ["/usr/local/bin/bikeshed"]
+WORKDIR /data
+ENTRYPOINT ["/usr/bin/bikeshed"]
