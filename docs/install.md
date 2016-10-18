@@ -77,9 +77,36 @@ $ sudo pip install lxml --upgrade
 
 That'll spew a lot of console trash, but don't worry about it.
 
+In some installations you'll need to also upgrade `setuptools` for `html5lib`'s entertainment:
+
+~~~~
+$ sudo pip install lxml setuptools --upgrade
+~~~~
+
 From here, you can follow the commons steps outlined below.
 
-### OS X steps
+Travis CI steps
+---------------
+
+To use bikeshed on [Travis CI](https://travis-ci.org/)'s github integration, you'll need the following `.travis.yml` commands:
+
+~~~
+sudo: false
+language: python
+python:
+  - "2.7"
+install:
+  - pip install pygments lxml setuptools --upgrade
+  - git clone https://github.com/tabatkins/bikeshed.git
+  - pip install --editable $PWD/bikeshed
+  - bikeshed update
+script:
+  # Invoke bikeshed here, at your own leisure. E.g.:
+  - bikeshed spec
+~~~
+
+OS X steps
+----------
 
 Note: If you're on a relatively modern Mac you should be able to proceed directly to [Common steps](#common-steps).
 

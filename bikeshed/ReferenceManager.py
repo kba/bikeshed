@@ -90,10 +90,10 @@ class ReferenceManager(object):
     def status(self, val):
         if val is None:
             self._status = None
-        elif val in config.TRStatuses:
-            self._status = "TR"
+        elif val in config.snapshotStatuses:
+            self._status = "snapshot"
         elif val in config.shortToLongStatus:
-            self._status = "ED"
+            self._status = "current"
         else:
             die("Unknown spec status '{0}'.", val)
             self._status = None
@@ -181,7 +181,7 @@ class ReferenceManager(object):
     def getLocalRef(self, linkType, text, linkFor=None, linkForHint=None, el=None, exact=False):
         return self._queryRefs(text=text, linkType=linkType, status="local", linkFor=linkFor, linkForHint=linkForHint, exact=exact)[0]
 
-    def getRef(self, linkType, text, spec=None, status=None, linkFor=None, linkForHint=None, error=True, el=None):
+    def getRef(self, linkType, text, spec=None, status=None, statusHint=None, linkFor=None, linkForHint=None, error=True, el=None):
         # If error is False, this function just shuts up and returns a reference or None
         # Otherwise, it pops out debug messages for the user.
 
@@ -192,11 +192,13 @@ class ReferenceManager(object):
         text = unfixTypography(text)
         if linkType in config.lowercaseTypes:
             text = text.lower()
-
-        status = status or self.status
-        if status not in ("ED", "TR", "local"):
+        if spec is not None:
+            spec = spec.lower()
+        if statusHint is None:
+            statusHint = self.status
+        if status not in config.linkStatuses and status is not None:
             if error:
-                die("Unknown spec status '{0}'. Status must be ED, TR, or local.", status, el=el)
+                die("Unknown spec status '{0}'. Status must be {1}.", status, config.englishFromList(config.linkStatuses), el=el)
             return None
 
         # Local refs always get precedence, unless you manually specified a spec.
@@ -213,6 +215,20 @@ class ReferenceManager(object):
                               "' or '".join(localRefs[0].for_),
                               el=el)
                 return localRefs[0]
+
+        # Then anchor-block refs get preference
+        blockRefs,_ = self.queryRefs(linkType=linkType, text=text, spec=spec, linkFor=linkFor, linkForHint=linkForHint, el=el, status="anchor-block")
+        if len(blockRefs) == 1:
+            return blockRefs[0]
+        elif len(blockRefs) > 1:
+            if error:
+                linkerror("Multiple possible '{0}' anchor-block refs for '{1}'.\nArbitrarily chose the one with type '{2}' and for '{3}'.",
+                          linkType,
+                          text,
+                          blockRefs[0].type,
+                          "' or '".join(blockRefs[0].for_),
+                          el=el)
+            return blockRefs[0]
 
         # Take defaults into account
         if not spec or not status:
@@ -231,7 +247,7 @@ class ReferenceManager(object):
             export = True
         else:
             export = None
-        refs, failure = self.queryRefs(text=text, linkType=linkType, spec=spec, status=status, linkFor=linkFor, linkForHint=linkForHint, export=export, ignoreObsoletes=True)
+        refs, failure = self.queryRefs(text=text, linkType=linkType, spec=spec, status=status, statusHint=statusHint, linkFor=linkFor, linkForHint=linkForHint, export=export, ignoreObsoletes=True)
 
         if failure and linkType in ("argument", "idl") and linkFor is not None and linkFor.endswith("()"):
             # foo()/bar failed, because foo() is technically the wrong signature
@@ -284,7 +300,7 @@ class ReferenceManager(object):
             methodRefs = {c.url: c for c in candidates if c.text.startswith(methodPrefix)}.values()
             if not methodRefs:
                 # Look for non-locals, then
-                candidates, _ = self.queryRefs(linkType="functionish", spec=spec, status=status, linkFor=interfaceName, export=export, ignoreObsoletes=True)
+                candidates, _ = self.queryRefs(linkType="functionish", spec=spec, status=status, statusHint=statusHint, linkFor=interfaceName, export=export, ignoreObsoletes=True)
                 methodRefs = {c.url: c for c in candidates if c.text.startswith(methodPrefix)}.values()
             if zeroRefsError and len(methodRefs) > 1:
                 # More than one possible foo() overload, can't tell which to link to
@@ -367,7 +383,6 @@ class ReferenceManager(object):
         return defaultRef
 
     def getBiblioRef(self, text, status="normative", generateFakeRef=False, el=None, quiet=False):
-        specStatus = "dated" if self.status == "TR" else "current"
         key = text.lower()
         if key in ["notifications", "fullscreen", "dom", "url", "encoding"]:
             # A handful of specs where W3C is squatting with an out-of-date fork.
@@ -388,7 +403,7 @@ class ReferenceManager(object):
                 if ref:
                     return ref
             if generateFakeRef:
-                return biblio.SpecBasedBiblioEntry(self.specs[key], preferredURL=specStatus)
+                return biblio.SpecBasedBiblioEntry(self.specs[key], preferredURL=self.status)
             else:
                 return None
         else:
@@ -404,7 +419,7 @@ class ReferenceManager(object):
             # Follow the chain to the real candidate
             bib = self.getBiblioRef(candidate["aliasOf"], status=status, el=el, quiet=True)
         else:
-            bib = biblio.BiblioEntry(preferredURL=specStatus, **candidate)
+            bib = biblio.BiblioEntry(preferredURL=self.status, **candidate)
 
         # If a canonical name has been established, use it.
         if bib.linkText in self.preferredBiblioNames:
@@ -412,14 +427,14 @@ class ReferenceManager(object):
 
         return bib
 
-    def queryRefs(self, text=None, spec=None, linkType=None, linkFor=None, linkForHint=None, status=None, export=None, ignoreObsoletes=False, **kwargs):
-        results, error = self._queryRefs(text, spec, linkType, linkFor, linkForHint, status, export, ignoreObsoletes, exact=True)
+    def queryRefs(self, text=None, spec=None, linkType=None, linkFor=None, linkForHint=None, status=None, statusHint=None, export=None, ignoreObsoletes=False, **kwargs):
+        results, error = self._queryRefs(text, spec, linkType, linkFor, linkForHint, status, statusHint, export, ignoreObsoletes, exact=True)
         if error:
-            return self._queryRefs(text, spec, linkType, linkFor, linkForHint, status, export, ignoreObsoletes)
+            return self._queryRefs(text, spec, linkType, linkFor, linkForHint, status, statusHint, export, ignoreObsoletes)
         else:
             return results, error
 
-    def _queryRefs(self, text=None, spec=None, linkType=None, linkFor=None, linkForHint=None, status=None, export=None, ignoreObsoletes=False, exact=False, error=False, **kwargs):
+    def _queryRefs(self, text=None, spec=None, linkType=None, linkFor=None, linkForHint=None, status=None, statusHint=None, export=None, ignoreObsoletes=False, exact=False, error=False, **kwargs):
         # Query the ref database.
         # If it fails to find a ref, also returns the stage at which it finally ran out of possibilities.
         def refsIterator(refs):
@@ -493,18 +508,25 @@ class ReferenceManager(object):
         if not refs:
             return refs, "for"
 
-        if status:
-            # If status is ED, kill TR refs unless their spec *only* has a TR url
-            if status == "ED":
-                refs = [ref for ref in refs if ref.status == "ED" or (ref.status == "TR" and self.specs.get(ref.spec,{}).get('ED') is None)]
-            # If status is TR, kill ED refs if there's a corresponding TR ref for the same spec.
-            elif status == "TR":
-                TRRefSpecs = [ref.spec for ref in refs if ref.status == 'TR']
-                refs = [ref for ref in refs if ref.status == "TR" or (ref.status == "ED") and ref.spec not in TRRefSpecs]
+        def filterByStatus(refs, status):
+            # If status is "current'", kill snapshot refs unless their spec *only* has a snapshot_url
+            if status == "current":
+                return [ref for ref in refs if ref.status == "current" or (ref.status == "snapshot" and self.specs.get(ref.spec,{}).get('current_url') is None)]
+            # If status is "snapshot", kill current refs if there's a corresponding snapshot ref for the same spec.
+            elif status == "snapshot":
+                snapshotSpecs = [ref.spec for ref in refs if ref.status == 'snapshot']
+                return [ref for ref in refs if ref.status == "snapshot" or (ref.status == "current" and ref.spec not in snapshotSpecs)]
             else:
-                refs = [x for x in refs if x.status == status]
+                return [x for x in refs if x.status == status]
+        if status:
+            refs = filterByStatus(refs, status)
         if not refs:
             return refs, "status"
+
+        if status is None and statusHint:
+            tempRefs = filterByStatus(refs, statusHint)
+            if tempRefs:
+                refs = tempRefs
 
         if ignoreObsoletes and not spec:
             # Remove any ignored or obsoleted specs
@@ -537,20 +559,20 @@ class ReferenceManager(object):
 
         # If multiple levels of the same shortname exist,
         # only use the latest level.
-        # If generating for TR, prefer the latest TR level,
+        # If generating for a snapshot, prefer the latest snapshot level,
         # unless that doesn't exist, in which case just prefer the latest level.
         shortnameLevels = defaultdict(lambda:defaultdict(list))
-        TRShortnameLevels = defaultdict(lambda:defaultdict(list))
+        snapshotShortnameLevels = defaultdict(lambda:defaultdict(list))
         for ref in refs:
             shortnameLevels[ref.shortname][ref.level].append(ref)
-            if status == "TR" and ref.status == "TR":
-                TRShortnameLevels[ref.shortname][ref.level].append(ref)
+            if status == ref.status == "snapshot":
+                snapshotShortnameLevels[ref.shortname][ref.level].append(ref)
         refs = []
         for shortname, levelSet in shortnameLevels.items():
-            if status == "TR" and TRShortnameLevels[shortname]:
-                # Get the latest TR refs if they exist and you're generating for TR...
-                maxLevel = max(TRShortnameLevels[shortname].keys())
-                refs.extend(TRShortnameLevels[shortname][maxLevel])
+            if status == "snapshot" and snapshotShortnameLevels[shortname]:
+                # Get the latest snapshot refs if they exist and you're generating a snapshot...
+                maxLevel = max(snapshotShortnameLevels[shortname].keys())
+                refs.extend(snapshotShortnameLevels[shortname][maxLevel])
             else:
                 # Otherwise just grab the latest refs regardless.
                 maxLevel = max(levelSet.keys())

@@ -246,7 +246,7 @@ def main():
         else:
             rm = ReferenceManager()
             rm.initializeRefs()
-        refs,_ = list(rm.queryRefs(text=options.text, linkFor=options.linkFor, linkType=options.linkType, status=options.status, spec=options.spec, exact=options.exact))
+        refs,_ = list(rm.queryRefs(text=unicode(options.text, encoding="utf-8"), linkFor=options.linkFor, linkType=options.linkType, status=options.status, spec=options.spec, exact=options.exact))
         p(config.printjson(refs))
     elif options.subparserName == "issues-list":
         from . import issuelist as il
@@ -325,7 +325,7 @@ class Spec(object):
         self.normativeRefs = {}
         self.informativeRefs = {}
         self.refs = ReferenceManager()
-        self.externalRefsUsed = defaultdict(dict)
+        self.externalRefsUsed = defaultdict(lambda:defaultdict(dict))
         self.md = metadata.MetadataManager(doc=self)
         self.biblios = {}
         self.typeExpansions = {}
@@ -743,9 +743,9 @@ class Spec(object):
             if innerText in self.macros:
                 # For some reason I store all the macros in lowercase,
                 # despite requiring them to be spelled with uppercase.
-                return self.macros[innerText.lower()]
+                return self.macros[innerText]
             if moreMacros and innerText in moreMacros:
-                return moreMacros[innerText.lower()]
+                return moreMacros[innerText]
             # Nothing has matched, so start failing the macros.
             if optional:
                 return ""
@@ -976,16 +976,16 @@ def fixInterDocumentReferences(doc):
                     # multiple headings of this id, user needs to disambiguate
                     die("Multiple headings with id '{0}' for spec '{1}'. Please specify:\n{2}", section, spec, "\n".join("  [[{0}]]".format(spec + x) for x in heading), el=el)
                     continue
-            if doc.md.status == "ED":
-                if "ED" in heading:
-                    heading = heading["ED"]
+            if doc.md.status == "current":
+                if "current" in heading:
+                    heading = heading["current"]
                 else:
-                    heading = heading["TR"]
+                    heading = heading["snapshot"]
             else:
-                if "TR" in heading:
-                    heading = heading["TR"]
+                if "snapshot" in heading:
+                    heading = heading["snapshot"]
                 else:
-                    heading = heading["ED"]
+                    heading = heading["current"]
             el.tag = "a"
             el.set("href", heading['url'])
             if isEmpty(el):
@@ -1357,12 +1357,28 @@ def processAutolinks(doc):
         if linkType in ("property", "descriptor", "propdesc") and "*" in linkText:
             continue
 
+        # Not super clear why I think links will specify multiple for values,
+        # or why it's okay to just use the first one in that case.
         linkFor = config.splitForValues(el.get('data-link-for'))
         if linkFor:
             linkFor = linkFor[0]
+
+        # Status used to use ED/TR, so convert those if they appear,
+        # and verify
+        status = el.get('data-link-status')
+        if status == "ED":
+            status = "current"
+        elif status == "TR":
+            status = "snapshot"
+        elif status in config.linkStatuses or status is None:
+            pass
+        else:
+            die("Unknown link status '{0}' on {1}", status, outerHTML(el))
+            continue
+
         ref = doc.refs.getRef(linkType, linkText,
                               spec=el.get('data-link-spec'),
-                              status=el.get('data-link-status'),
+                              status=status,
                               linkFor=linkFor,
                               linkForHint=el.get('data-link-for-hint'),
                               el=el,
@@ -1372,9 +1388,10 @@ def processAutolinks(doc):
         # rather than checking `status == "local"`, as "local" refs include
         # those defined in `<pre class="anchor">` datablocks, which we do
         # want to capture here.
-        if ref and ref.spec is not None and ref.spec is not "" and ref.spec.lower() != doc.refs.specVName.lower():
-            if ref.text not in doc.externalRefsUsed[ref.spec.lower()]:
-                doc.externalRefsUsed[ref.spec.lower()][ref.text] = ref
+        if ref and ref.spec and ref.spec.lower() != doc.refs.specVName.lower():
+            spec = ref.spec.lower()
+            key = ref.for_[0] if ref.for_ else ""
+            doc.externalRefsUsed[spec][ref.text][key] = ref
             if isNormative(el):
                 biblioStatus = "normative"
                 biblioStorage = doc.normativeRefs
@@ -1633,17 +1650,9 @@ def addCanIUsePanels(doc):
     features = doc.canIUse["data"]
     lastUpdated = datetime.utcfromtimestamp(doc.canIUse["updated"]).date().isoformat()
 
-    # e.g. 'ios_saf' -> 'iOS Safari'
-    codeNameToFullName = OrderedDict( # sorted by full name
-        sorted(
-            [
-                (agentCodeName, agent["browser"])
-                for agentCodeName, agent
-                in doc.canIUse["agents"].iteritems()
-            ],
-            key=lambda p: p[1]
-        )
-    )
+    # e.g. 'iOS Safari' -> 'ios_saf'
+    classFromBrowser = doc.canIUse["agents"]
+
     atLeastOnePanel = False
     caniuseDfnElementsSelector = ",".join(
         selector + "[caniuse]"
@@ -1661,7 +1670,7 @@ def addCanIUsePanels(doc):
         feature = features[featId]
 
         addClass(dfn, "caniuse-paneled")
-        panel = canIUsePanelFor(codeNameToFullName, featId, feature['stats'], lastUpdated)
+        panel = canIUsePanelFor(id=featId, data=feature, update=lastUpdated, classFromBrowser=classFromBrowser)
         panel.set("dfn-id", dfn.get("id"))
         appendChild(doc.body, panel)
         atLeastOnePanel = True
@@ -1693,6 +1702,7 @@ def addCanIUsePanels(doc):
             .caniuse-status > .support > span { padding: 0.2em 0; display: block; display: table; }
             .caniuse-status > .support > span.partial { color: #666666; filter: grayscale(50%); }
             .caniuse-status > .support > span.no { color: #CCCCCC; filter: grayscale(100%); }
+            .canisue-status > .support > span.no::before { opacity: 0.5; }
             .caniuse-status > .support > span:first-of-type { padding-top: 0.5em; }
             .caniuse-status > .support > span > span { padding: 0 0.5em; display: table-cell; vertical-align: top; }
             .caniuse-status > .support > span > span:first-child { width: 100%; }
@@ -1713,6 +1723,7 @@ def addCanIUsePanels(doc):
             .caniuse-status > .support > .op_mob::before { background-image: url(https://resources.whatwg.org/browser-logos/opera.png); }
             .caniuse-status > .support > .opera::before { background-image: url(https://resources.whatwg.org/browser-logos/opera.png); }
             .caniuse-status > .support > .safari::before { background-image: url(https://resources.whatwg.org/browser-logos/safari.png); }
+            .caniuse-status > .support > .samsung::before { background-image: url(https://resources.whatwg.org/browser-logos/samsung.png); }
             .caniuse-status > .caniuse { text-align: right; font-style: italic; }
             @media (max-width: 767px) {
                 .caniuse-status.wrapped { width: 9em; height: auto; }
@@ -1722,62 +1733,24 @@ def addCanIUsePanels(doc):
             }'''
 
 
-def canIUsePanelFor(codeNameToFullName, featId, featStats, lastUpdated):
+def canIUsePanelFor(id, data, update, classFromBrowser):
     panel = E.aside({"class": "caniuse-status", "data-deco": ""},
         E.input({"value": u"\u22F0", "type": "button", "class":"caniuse-panel-btn"}))
     mainPara = E.p({"class": "support"}, E.b({}, "Support:"))
     appendChild(panel, mainPara)
-    for browserCodeName, browserFullName in codeNameToFullName.iteritems():
-        statusCode, minVersion = compatSummaryFor(featStats[browserCodeName])
+    for browser,support in data['support'].items():
+        statusCode = support[0]
         if statusCode == "u":
             continue
+        minVersion = support[2:]
         appendChild(mainPara,
-            browserCompatSpan(browserCodeName, browserFullName, statusCode, minVersion))
+            browserCompatSpan(classFromBrowser[browser], browser, statusCode, minVersion))
     appendChild(panel,
         E.p({"class": "caniuse"},
             "Source: ",
-            E.a({"href": "http://caniuse.com/#feat=" + featId}, "caniuse.com"),
-            " as of " + lastUpdated))
+            E.a({"href": "http://caniuse.com/#feat=" + id}, "caniuse.com"),
+            " as of " + update))
     return panel
-
-
-def compatSummaryFor(versionToStatus):
-    bestStatusYet = "u"
-    lowestGoodVersion = None
-    versionsDescending = versionToStatus.keys()
-    versionsDescending.reverse()  # In the original JSON, they're in ascending order.
-    for version in versionsDescending:
-        status = versionToStatus[version]
-        if "u" in status:
-            continue
-        # Simplify vendor-prefi(x)ed/(d)isabled-by-default/(p)olyfilled to u(n)supported
-        # And remove notes etc. by canonicalizing to single char.
-        if "x" in status or "d" in status or "n" in status or "p" in status:
-            status = "n"
-        elif "a" in status:
-            status = "a"
-        elif "y" in status:
-            status = "y"
-        # assert status in "nay"
-
-        if bestStatusYet == "u":
-            # 1st datapoint
-            bestStatusYet = status
-            lowestGoodVersion = version
-            continue
-
-        if "n" in status:  # It Got Worse (or is still unsupported)
-            break
-
-        if status == bestStatusYet:
-            # New winner
-            lowestGoodVersion = version
-        else:
-            # Either: Old version was buggy, new version is fixed.
-            # Or: New version introduced bug(s); you can be no better than your last release.
-            break
-
-    return bestStatusYet, lowestGoodVersion
 
 
 def browserCompatSpan(browserCodeName, browserFullName, statusCode, minVersion=None):
@@ -1786,8 +1759,7 @@ def browserCompatSpan(browserCodeName, browserFullName, statusCode, minVersion=N
     elif minVersion == "all":
         minVersion = "All"
     else:
-        # If the version is a range (e.g. "9.0-9.2"), just use the lower bound (e.g. "9.0").
-        minVersion = minVersion.partition('-')[0] + "+"
+        minVersion = minVersion + "+"
     # browserCodeName: e.g. and_chr, ios_saf, ie, etc...
     # browserFullName: e.g. "Chrome for Android"
     statusClass = {"y": "yes", "n": "no", "a": "partial"}[statusCode]
@@ -2496,7 +2468,6 @@ def cleanupHTML(doc):
             removeAttr(el, 'data-dfn-type')
             removeAttr(el, 'data-export')
             removeAttr(el, 'data-noexport')
-        removeAttr(el, 'oldids')
         removeAttr(el, 'data-alternate-id')
         removeAttr(el, 'highlight')
         removeAttr(el, 'nohighlight')

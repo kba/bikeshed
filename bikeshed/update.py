@@ -3,7 +3,7 @@ from __future__ import division, unicode_literals
 import json
 import re
 import io
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from contextlib import closing
 import urllib2
 
@@ -36,7 +36,7 @@ def updateCrossRefs():
         res = shepherd.get("specifications", anchors=True, draft=True)
         # http://api.csswg.org/shepherd/spec/?spec=css-flexbox-1&anchors&draft, for manual looking
         if ((not res) or (406 == res.status)):
-            die("This version of the anchor-data API is no longer supported. Please update Bikeshed.")
+            die("Either this version of the anchor-data API is no longer supported, or (more likely) there was a transient network error. Try again in a little while, and/or update Bikeshed. If the error persists, please report it on GitHub.")
             return
         if res.contentType not in config.anchorDataContentTypes:
             die("Unrecognized anchor-data content-type '{0}'.", res.contentType)
@@ -65,8 +65,8 @@ def updateCrossRefs():
         spec = {
             'vshortname': rawSpec['name'],
             'shortname': rawSpec.get('short_name'),
-            'TR': rawSpec.get('base_uri'),
-            'ED': rawSpec.get('draft_uri'),
+            'snapshot_url': rawSpec.get('base_uri'),
+            'current_url': rawSpec.get('draft_uri'),
             'title': rawSpec.get('title'),
             'description': rawSpec.get('description'),
             'work_status': rawSpec.get('work_status'),
@@ -101,7 +101,7 @@ def updateCrossRefs():
                 obj['status'] = status
                 return obj
             return temp
-        rawAnchorData = map(setStatus('TR'), linearizeAnchorTree(rawSpec.get('anchors', []))) + map(setStatus('ED'), linearizeAnchorTree(rawSpec.get('draft_anchors',[])))
+        rawAnchorData = map(setStatus('snapshot'), linearizeAnchorTree(rawSpec.get('anchors', []))) + map(setStatus('current'), linearizeAnchorTree(rawSpec.get('draft_anchors',[])))
         for rawAnchor in rawAnchorData:
             rawAnchor = fixupAnchor(rawAnchor)
             linkingTexts = rawAnchor.get('linking_text', [rawAnchor.get('title')])
@@ -109,6 +109,14 @@ def updateCrossRefs():
                 continue
             if len(linkingTexts) == 1 and linkingTexts[0].strip() == "":
                 continue
+            # If any smart quotes crept in, replace them with ASCII.
+            for i,t in enumerate(linkingTexts):
+                if "’" in t or "‘" in t:
+                    t = re.sub(r"‘|’", "'", t)
+                    linkingTexts[i] = t
+                if "“" in t or "”" in t:
+                    t = re.sub(r"“|”", '"', t)
+                    linkingTexts[i] = t
             if rawAnchor['type'] == "heading":
                 uri = rawAnchor['uri']
                 if uri.startswith("??"):
@@ -117,7 +125,7 @@ def updateCrossRefs():
                 if uri[0] == "#":
                     # Either single-page spec, or link on the top page of a multi-page spec
                     heading = {
-                        'url': spec[rawAnchor['status']] + uri,
+                        'url': spec["{0}_url".format(rawAnchor['status'])] + uri,
                         'number': rawAnchor['name'] if re.match(r"[\d.]+$", rawAnchor['name']) else "",
                         'text': rawAnchor['title'],
                         'spec': spec['title']
@@ -141,7 +149,7 @@ def updateCrossRefs():
                         fragment = "#"
                     shorthand = page + fragment
                     heading = {
-                        'url': spec[rawAnchor['status']] + uri,
+                        'url': spec["{0}_url".format(rawAnchor['status'])] + uri,
                         'number': rawAnchor['name'] if re.match(r"[\d.]+$", rawAnchor['name']) else "",
                         'text': rawAnchor['title'],
                         'spec': spec['title']
@@ -162,7 +170,7 @@ def updateCrossRefs():
                     'level': int(spec['level']),
                     'export': rawAnchor.get('export', False),
                     'normative': rawAnchor.get('normative', False),
-                    'url': spec[rawAnchor['status']] + rawAnchor['uri'],
+                    'url': spec["{0}_url".format(rawAnchor['status'])] + rawAnchor['uri'],
                     'for': rawAnchor.get('for', [])
                 }
                 for text in linkingTexts:
@@ -291,15 +299,83 @@ def updateCanIUse():
     try:
         with closing(urllib2.urlopen("https://raw.githubusercontent.com/Fyrd/caniuse/master/fulldata-json/data-2.0.json")) as fh:
             jsonString = fh.read()
-        # Check that the data is valid JSON
-        json.loads(jsonString)
     except Exception, e:
         die("Couldn't download the Can I Use data.\n{0}", e)
         return
+
+    try:
+        data = json.loads(unicode(jsonString), encoding="utf-8", object_pairs_hook=OrderedDict)
+    except Exception, e:
+        die("The Can I Use data wasn't valid JSON for some reason. Try downloading again?\n{0}", e)
+        return
+
+    # Remove some unused data
+    if "cats" in data:
+        del data["cats"]
+    if "statuses" in data:
+        del data["statuses"]
+
+    # Trim agent data to minimum required - mapping codename to full name
+    codeNames = {}
+    agentData = {}
+    for codename,agent in data["agents"].items():
+        codeNames[codename] = agent["browser"]
+        agentData[agent["browser"]] = codename
+    data["agents"] = agentData
+
+    # Trim feature data to minimum - notes and minimum supported version
+    def simplifyStatus(s, *rest):
+        if "x" in s or "d" in s or "n" in s or "p" in s:
+            return "n"
+        elif "a" in s:
+            return "a"
+        elif "y" in s:
+            return "y"
+        elif "u" in s:
+            return "u"
+        else:
+            die("Unknown CanIUse Status '{0}' for {1}/{2}/{3}. Please report this as a Bikeshed issue.", s, *rest)
+            return None
+    def simplifyVersion(v):
+        if "-" in v:
+            # Use the earliest version in a range.
+            v,_,_ = v.partition("-")
+        return v
+    featureData = {}
+    for featureName,feature in data["data"].items():
+        notes = feature["notes"]
+        browserData = {}
+        for browser,versions in feature["stats"].items():
+            descendingVersions = list(reversed(versions.items()))
+            mostRecent = descendingVersions[0]
+            version = simplifyVersion(mostRecent[0])
+            status = simplifyStatus(mostRecent[1], featureName, browser, version)
+            if status == "n":
+                # Most recent version is broken, so we're done
+                pass
+            elif status == "u":
+                # Seek backwards until I find something other than "u"
+                for v,s in descendingVersions:
+                    if simplifyStatus(s) != "u":
+                        status = simplifyStatus(s)
+                        version = simplifyVersion(v)
+                        break
+            else:
+                # Status is either (a)lmost or (y)es,
+                # seek backwards thru time as long as it's the same.
+                for v,s in descendingVersions:
+                    if simplifyStatus(s) == status:
+                        version = simplifyVersion(v)
+                    else:
+                        break
+            browserData[codeNames[browser]] = "{0} {1}".format(status, version)
+        featureData[featureName] = {"notes":notes, "support":browserData}
+    data["data"] = featureData
+
     if not config.dryRun:
         try:
-            with closing(io.open(config.scriptPath + "/spec-data/caniuse.json", 'wb')) as fh:
-                fh.write(jsonString)
+            with closing(io.open(config.scriptPath + "/spec-data/caniuse.json", 'w', encoding="utf-8")) as fh:
+                fh.write(unicode(json.dumps(data, indent=1, ensure_ascii=False, sort_keys=True)))
         except Exception, e:
             die("Couldn't save Can I Use database to disk.\n{0}", e)
             return
@@ -371,7 +447,7 @@ def writeBiblioFile(fh, biblios):
     date
     status
     title
-    dated url
+    snapshot url
     current url
     other
     etAl (as a boolish string)
@@ -389,7 +465,7 @@ def writeBiblioFile(fh, biblios):
         format = b['biblioFormat']
         fh.write("{prefix}:{key}\n".format(prefix=typePrefixes[format], key=key.lower()))
         if format == "dict":
-            for field in ["linkText", "date", "status", "title", "dated_url", "current_url", "other"]:
+            for field in ["linkText", "date", "status", "title", "snapshot_url", "current_url", "other"]:
                 fh.write(b.get(field, "") + "\n")
             if b.get("etAl", False):
                 fh.write("1\n")

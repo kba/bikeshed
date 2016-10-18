@@ -211,8 +211,8 @@ def addExplicitIndexes(doc):
         else:
             types = None
         status = container.get('status')
-        if status and status not in ["TR", "ED"]:
-            die("<index> has unknown value '{0}' for status. Must be TR or ED.", status, el=container)
+        if status and status not in config.specStatuses:
+            die("<index> has unknown value '{0}' for status. Must be {1}.", status, config.englishFromList(config.specStatuses), el=container)
             continue
         if container.get('for').strip() == "*":
             specs = None
@@ -257,10 +257,10 @@ def addExplicitIndexes(doc):
                                 indexEntries[text][i] = entry
                                 break
                         else:
-                            # Default to preferring EDs
-                            if existingEntry['status'] == "ED":
+                            # Default to preferring current specs
+                            if existingEntry['status'] == "current":
                                 break
-                            elif entry['status'] == "ED":
+                            elif entry['status'] == "current":
                                 indexEntries[text][i] = entry
                                 break
                     else:
@@ -307,7 +307,7 @@ def addIndexOfExternallyDefinedTerms(doc, container):
         return
 
     ul = E.ul({"class": "index"})
-    for spec, refs in sorted(doc.externalRefsUsed.items(), key=lambda x:x[0]):
+    for spec, refGroups in sorted(doc.externalRefsUsed.items(), key=lambda x:x[0]):
         # ref.spec is always lowercase; if the same string shows up in biblio data,
         # use its casing instead.
         biblioRef = doc.refs.getBiblioRef(spec, status="normative")
@@ -320,12 +320,25 @@ def addIndexOfExternallyDefinedTerms(doc, container):
                              E.li(
                                  E.a(attrs, "[", printableSpec, "]"), " defines the following terms:"))
         termsUl = appendChild(specLi, E.ul())
-        for title, ref in sorted(refs.items(), key=lambda x:x[0]):
-            appendChild(termsUl, E.li(E.a({"href":ref.url}, title)))
-
+        for text,refs in sorted(refGroups.items(), key=lambda x:x[0]):
+            if len(refs) == 1:
+                ref = refs.values()[0]
+                appendChild(termsUl,
+                            E.li(E.a({"href":ref.url}, ref.text)))
+            else:
+                for key,ref in sorted(refs.items(), key=lambda x:x[0]):
+                    if key:
+                        link = E.a({"href":ref.url},
+                                   ref.text,
+                                   " ",
+                                   E.small({}, "(for {0})".format(key)))
+                    else:
+                        link = E.a({"href":ref.url},
+                                   ref.text)
+                    appendChild(termsUl, E.li(link))
     appendChild(container,
-                E.h3({"class":"no-num no-ref", "id":"index-defined-elsewhere"}, "Terms defined by reference"))
-    appendChild(container, ul)
+                E.h3({"class":"no-num no-ref", "id":"index-defined-elsewhere"}, "Terms defined by reference"),
+                ul)
 
 
 def addPropertyIndex(doc):
@@ -599,7 +612,7 @@ def addSpecMetadataSection(doc):
         md["This version"].append(E.a({"href":mac['version'], "class":"u-url"}, mac['version']))
     if doc.md.TR:
         md["Latest published version"].append(E.a({"href": doc.md.TR}, doc.md.TR))
-    if doc.md.ED and doc.md.status in config.TRStatuses:
+    if doc.md.ED and doc.md.status in config.snapshotStatuses:
         md["Editor's Draft"].append(E.a({"href": doc.md.ED}, doc.md.ED))
     if len(doc.md.previousVersions):
         md["Previous Versions"] = [E.a({"href":ver, "rel":"previous"}, ver) for ver in doc.md.previousVersions]

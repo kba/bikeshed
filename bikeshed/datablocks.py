@@ -460,13 +460,13 @@ def processAnchors(anchors, doc, lineNum=None):
                 level = config.HierarchicalNumber("")
         if "status" in anchor:
             status = anchor["status"][0]
-            if status in ["local", "TR","ED"]:
+            if status in config.linkStatuses:
                 pass
             else:
-                die("Anchor statuses must be 'local', 'ED', or 'TR'. Got '{0}'.", status, lineNum=lineNum)
+                die("Anchor statuses must be {1}. Got '{0}'.", status, config.englishFromList(config.linkStatuses), lineNum=lineNum)
                 continue
         else:
-            status = "local"
+            status = "anchor-block"
         if anchor['type'][0] in config.lowercaseTypes:
             anchor['text'][0] = anchor['text'][0].lower()
         doc.refs.refs[anchor['text'][0]].append({
@@ -477,7 +477,7 @@ def processAnchors(anchors, doc, lineNum=None):
             "level": level if level is not None else doc.md.level,
             "for": anchor.get('for', []),
             "export": True,
-            "status": status.lower(),
+            "status": status,
             "spec": spec.lower() if spec is not None else ''
         })
         methodishStart = re.match(r"([^(]+\()[^)]", anchor['text'][0])

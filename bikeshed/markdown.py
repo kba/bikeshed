@@ -41,7 +41,8 @@ def tokenizeLines(lines, numSpacesForIndentation, features=None, opaqueElements=
     tokens = []
     rawStack = []
     if opaqueElements is None:
-        opaqueElements = ["pre", "xmp", "script", "style"]
+    	opaqueElements = []
+    opaqueElements += ["pre", "xmp", "script", "style"]
     rawElements = "|".join(re.escape(x) for x in opaqueElements)
 
     lineCountCorrection = 0
@@ -85,9 +86,9 @@ def tokenizeLines(lines, numSpacesForIndentation, features=None, opaqueElements=
                 classAttr = " class='language-{0}'".format(escapeAttr(lang))
             else:
                 classAttr = ""
-            tokens.append({'type':'raw', 'raw':'<xmp{0}>'.format(classAttr), 'prefixline':float('inf'), 'line':i + lineCountCorrection})
+            tokens.append({'type':'raw', 'raw':'<xmp{0}>'.format(classAttr), 'prefixlen':float('inf'), 'line':i + lineCountCorrection})
             continue
-        match = re.search(r"<({0})[ >]".format(rawElements), rawline)
+        match = re.match(r"\s*<({0})[ >]".format(rawElements), rawline)
         if match:
             tokens.append({'type':'raw', 'raw':rawline, 'prefixlen':float('inf'), 'line':i + lineCountCorrection})
             if re.search(r"</({0})>".format(match.group(1)), rawline):
@@ -128,7 +129,7 @@ def tokenizeLines(lines, numSpacesForIndentation, features=None, opaqueElements=
             match = re.search(r"\{#([^ }]+)\}\s*$", line)
             if match:
                 token['id'] = match.group(1)
-        elif re.match(r"((\*\s*){3,})|((-\s*){3,})|((_\s*){3,})$", line):
+        elif re.match(r"((\*\s*){3,})$|((-\s*){3,})$|((_\s*){3,})$", line):
             token = {'type':'rule', 'raw': rawline}
         elif re.match(r"-?\d+\.\s", line):
             match = re.match(r"(-?\d+)\.\s+(.*)", line)
