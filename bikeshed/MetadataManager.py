@@ -56,6 +56,7 @@ class MetadataManager:
         self.ignoredVars = []
         self.includeCanIUsePanels = False
         self.indent = 4
+        self.inferCSSDfns = False
         self.inlineGithubIssues = False
         self.issueClass = "issue"
         self.issues = []
@@ -811,8 +812,9 @@ knownKeys = {
     "H1": Metadata("H1", "h1", joinValue, parseLiteral),
     "Ignored Terms": Metadata("Ignored Terms", "ignoredTerms", joinList, parseCommaSeparated),
     "Ignored Vars": Metadata("Ignored Vars", "ignoredVars", joinList, parseCommaSeparated),
-    "Indent": Metadata("Indent", "indent", joinValue, parseInteger),
     "Include Can I Use Panels": Metadata("Include Can I Use Panels", "includeCanIUsePanels", joinValue, parseBoolean),
+    "Indent": Metadata("Indent", "indent", joinValue, parseInteger),
+    "Infer Css Dfns": Metadata("Infer Css Dfns", "inferCSSDfns", joinValue, parseBoolean),
     "Inline Github Issues": Metadata("Inline Github Issues", "inlineGithubIssues", joinValue, parseBoolean),
     "Issue Class": Metadata("Issue Class", "issueClass", joinValue, parseLiteral),
     "Issue Tracker Template": Metadata("Issue Tracker Template", "issueTrackerTemplate", joinValue, parseLiteral),
