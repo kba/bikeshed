@@ -85,7 +85,6 @@ $ sudo pip install lxml setuptools --upgrade
 
 From here, you can follow the commons steps outlined below.
 
-
 Travis CI steps
 ---------------
 
