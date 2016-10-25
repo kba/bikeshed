@@ -976,16 +976,16 @@ def fixInterDocumentReferences(doc):
                     # multiple headings of this id, user needs to disambiguate
                     die("Multiple headings with id '{0}' for spec '{1}'. Please specify:\n{2}", section, spec, "\n".join("  [[{0}]]".format(spec + x) for x in heading), el=el)
                     continue
-            if doc.md.status == "ED":
-                if "ED" in heading:
-                    heading = heading["ED"]
+            if doc.md.status == "current":
+                if "current" in heading:
+                    heading = heading["current"]
                 else:
-                    heading = heading["TR"]
+                    heading = heading["snapshot"]
             else:
-                if "TR" in heading:
-                    heading = heading["TR"]
+                if "snapshot" in heading:
+                    heading = heading["snapshot"]
                 else:
-                    heading = heading["ED"]
+                    heading = heading["current"]
             el.tag = "a"
             el.set("href", heading['url'])
             if isEmpty(el):
@@ -1101,7 +1101,7 @@ def processDfns(doc):
     doc.refs.addLocalDfns(dfn for dfn in dfns if dfn.get('id') is not None)
 
 
-def determineDfnType(dfn):
+def determineDfnType(dfn, inferCSS=False):
     # 1. Look at data-dfn-type
     if dfn.get('data-dfn-type'):
         return dfn.get('data-dfn-type')
@@ -1121,25 +1121,26 @@ def determineDfnType(dfn):
             if hasClass(ancestor, "idl") and not hasClass(ancestor, "extract"):
                 return "interface"
     # 4. Introspect on the text
-    text = textContent(dfn)
-    if text[0:1] == "@":
-        return "at-rule"
-    elif len(dfn) == 1 and dfn[0].get('data-link-type') == "maybe":
-        return "value"
-    elif text[0:1] == "<" and text[-1:] == ">":
-        return "type"
-    elif text[0:1] == ":":
-        return "selector"
-    elif re.match(r"^[\w-]+\(.*\)$", text) and not (dfn.get('id') or '').startswith("dom-"):
-        return "function"
-    else:
-        return "dfn"
+    if inferCSS:
+        text = textContent(dfn)
+        if text[0:1] == "@":
+            return "at-rule"
+        elif len(dfn) == 1 and dfn[0].get('data-link-type') == "maybe":
+            return "value"
+        elif text[0:1] == "<" and text[-1:] == ">":
+            return "type"
+        elif text[0:1] == ":":
+            return "selector"
+        elif re.match(r"^[\w-]+\(.*\)$", text) and not (dfn.get('id') or '').startswith("dom-"):
+            return "function"
+    # 5. Assume it's a "dfn"
+    return "dfn"
 
 
 def classifyDfns(doc, dfns):
     dfnTypeToPrefix = {v:k for k,v in config.dfnClassToType.items()}
     for el in dfns:
-        dfnType = determineDfnType(el)
+        dfnType = determineDfnType(el, inferCSS=doc.md.inferCSSDfns)
         if dfnType not in config.dfnTypes:
             die("Unknown dfn type '{0}' on:\n{1}", dfnType, outerHTML(el), el=el)
             continue
@@ -1357,12 +1358,28 @@ def processAutolinks(doc):
         if linkType in ("property", "descriptor", "propdesc") and "*" in linkText:
             continue
 
+        # Not super clear why I think links will specify multiple for values,
+        # or why it's okay to just use the first one in that case.
         linkFor = config.splitForValues(el.get('data-link-for'))
         if linkFor:
             linkFor = linkFor[0]
+
+        # Status used to use ED/TR, so convert those if they appear,
+        # and verify
+        status = el.get('data-link-status')
+        if status == "ED":
+            status = "current"
+        elif status == "TR":
+            status = "snapshot"
+        elif status in config.linkStatuses or status is None:
+            pass
+        else:
+            die("Unknown link status '{0}' on {1}", status, outerHTML(el))
+            continue
+
         ref = doc.refs.getRef(linkType, linkText,
                               spec=el.get('data-link-spec'),
-                              status=el.get('data-link-status'),
+                              status=status,
                               linkFor=linkFor,
                               linkForHint=el.get('data-link-for-hint'),
                               el=el,
@@ -2660,8 +2677,9 @@ def inlineRemoteIssues(doc):
         el = issue.el
         data = responses[key]
         clearContents(el)
+        remoteIssueURL = "https://github.com/{0}/{1}/issues/{2}".format(*issue)
         appendChild(el,
-                    E.a({"href":issue['html_url'], "class":"marker"},
+                    E.a({"href":remoteIssueURL, "class":"marker"},
                         "Issue #{0} on GitHub: “{1}”".format(data['number'], data['title'])),
                     *parseHTML(data['body_html']))
         if el.tag == "p":

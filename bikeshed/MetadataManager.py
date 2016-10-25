@@ -46,7 +46,7 @@ class MetadataManager:
         self.customTextMacros = []
         self.date = datetime.utcnow().date()
         self.deadline = None
-        self.defaultBiblioStatus = "dated"
+        self.defaultBiblioStatus = "snapshot"
         self.defaultHighlight = None
         self.editors = []
         self.editorTerm = {"singular": "Editor", "plural": "Editors"}
@@ -56,6 +56,7 @@ class MetadataManager:
         self.ignoredVars = []
         self.includeCanIUsePanels = False
         self.indent = 4
+        self.inferCSSDfns = False
         self.inlineGithubIssues = False
         self.issueClass = "issue"
         self.issues = []
@@ -151,7 +152,7 @@ class MetadataManager:
             requiredSingularKeys['ED'] = 'ED'
         if self.status in config.deadlineStatuses:
             requiredSingularKeys['deadline'] = 'Deadline'
-        if self.status in config.TRStatuses:
+        if self.status in config.snapshotStatuses:
             recommendedSingularKeys['date'] = 'Date'
         if self.status not in config.unlevelledStatuses:
             requiredSingularKeys['level'] = 'Level'
@@ -219,7 +220,7 @@ class MetadataManager:
         if self.deadline:
             macros["deadline"] = unicode(self.deadline.strftime("{0} %B %Y".format(self.deadline.day)), encoding="utf-8")
             macros["isodeadline"] = unicode(self.deadline.strftime("%Y-%m-%d"), encoding="utf-8")
-        if self.status in config.TRStatuses:
+        if self.status in config.snapshotStatuses:
             macros["version"] = "https://www.w3.org/TR/{year}/{status}-{vshortname}-{cdate}/".format(**macros)
         elif self.ED:
             macros["version"] = self.ED
@@ -392,7 +393,7 @@ def parseCommaSeparated(key, val, lineNum):
 def parseLinkDefaults(key, val, lineNum):
     defaultSpecs = defaultdict(list)
     for default in val.split(","):
-        match = re.match(r"^([\w\d-]+)  (?:\s+\( ({0}) (?:\s+(TR|ED))? \) )  \s+(.*)$".format("|".join(config.dfnTypes.union(["dfn"]))), default.strip(), re.X)
+        match = re.match(r"^([\w\d-]+)  (?:\s+\( ({0}) (?:\s+(snapshot|current))? \) )  \s+(.*)$".format("|".join(config.dfnTypes.union(["dfn"]))), default.strip(), re.X)
         if match:
             spec = match.group(1)
             type = match.group(2)
@@ -428,11 +429,14 @@ def parseBoilerplate(key, val, lineNum):
 
 def parseBiblioStatus(key, val, lineNum):
     val = val.strip().lower()
-    if val in ("current", "dated"):
+    if val == "dated":
+        # Legacy term that used to be allowed
+        val == "snapshot"
+    if val in ("current", "snapshot"):
         return val
     else:
-        die("'{0}' must be either 'current' or 'dated'. Got '{1}'", key, val, lineNum=lineNum)
-        return "dated"
+        die("'{0}' must be either 'current' or 'snapshot'. Got '{1}'", key, val, lineNum=lineNum)
+        return "snapshot"
 
 
 def parseComplainAbout(key, val, lineNum):
@@ -808,8 +812,9 @@ knownKeys = {
     "H1": Metadata("H1", "h1", joinValue, parseLiteral),
     "Ignored Terms": Metadata("Ignored Terms", "ignoredTerms", joinList, parseCommaSeparated),
     "Ignored Vars": Metadata("Ignored Vars", "ignoredVars", joinList, parseCommaSeparated),
-    "Indent": Metadata("Indent", "indent", joinValue, parseInteger),
     "Include Can I Use Panels": Metadata("Include Can I Use Panels", "includeCanIUsePanels", joinValue, parseBoolean),
+    "Indent": Metadata("Indent", "indent", joinValue, parseInteger),
+    "Infer Css Dfns": Metadata("Infer Css Dfns", "inferCSSDfns", joinValue, parseBoolean),
     "Inline Github Issues": Metadata("Inline Github Issues", "inlineGithubIssues", joinValue, parseBoolean),
     "Issue Class": Metadata("Issue Class", "issueClass", joinValue, parseLiteral),
     "Issue Tracker Template": Metadata("Issue Tracker Template", "issueTrackerTemplate", joinValue, parseLiteral),
